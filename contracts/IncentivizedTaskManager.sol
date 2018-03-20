@@ -1,70 +1,98 @@
+import './BillableWallet.sol';
 pragma solidity ^0.4.17;
 
 contract IncentivizedTaskManager {
 
-  struct Task {
-    bytes data;
-    function (bytes memory) external callback;
-    address taskOwner;
-    address billTo;
-  }
+	struct Task {
+		address contractLocation;
+		bytes4 callback;
+		bytes data;
+		address taskOwner;
+		address billTo;
+	}
 
-  struct IncentivizedTask {
-    Task task;
-    uint incentive;
-  }
+	struct IncentivizedTask {
+		Task task;
+		uint incentive;
+	}
 
-  struct ScheduledTask {
-    uint repeatTimes;
-    uint lastRun;
-    uint waitTime;
-    IncentivizedTask scheduled;
-  }
+	struct ScheduledTask {
+		uint repeatTimes;
+		uint lastRun;
+		uint waitTime;
+		IncentivizedTask scheduled;
+	}
 
-  uint public currentGasPrice;
-  ScheduledTask[] tasks;
-  Worker[] workers;
+	mapping(address => mapping(address => uint)) userTaskIndex;
+	ScheduledTask[] tasks;
+	//Worker[] workers;
 
-  function updateManagerInfo() {
-    currentGasPrice = 0;
-  }
+	function canRun(uint index) public view returns(bool) {
+		return tasks[index].lastRun + tasks[index].waitTime < now && tasks[index].repeatTimes >= 0;
+	}
 
-  function canRun(uint index) public view {
-    return tasks[index].lastRun + waitTime < now;
-  }
+	function addTask(bytes4 fn, address location, bytes params, uint repeatTimes, uint waitTime, uint incentive, address billableWallet) public {
+		ScheduledTask memory task = ScheduledTask({
+			repeatTimes: repeatTimes,
+			lastRun: 0,
+			waitTime: waitTime,
+			scheduled: IncentivizedTask({
+				task: Task({
+					data: params,
+					callback: fn,
+					taskOwner: msg.sender,
+					billTo: billableWallet,
+					contractLocation: location
+				}),
+				incentive: incentive})
+		});
+		tasks.push(task);
+		userTaskIndex[msg.sender][location]=tasks.length;
+	}
 
-  function addTask(function (bytes memory) external fn, bytes params, uint repeatTimes, uint waitTime, uint incentive, address billableWallet) public {
+	function updateTask(address contractLocation,  uint repeatTimes, uint waitTime, uint incentive, address billableWallet) public{
+		uint taskIndex = userTaskIndex[msg.sender][contractLocation];
+		tasks[taskIndex].repeatTimes = repeatTimes;
+		tasks[taskIndex].waitTime = waitTime;
+		tasks[taskIndex].scheduled.incentive = incentive;
+		tasks[taskIndex].scheduled.task.billTo = billableWallet;
+	}
 
-    Task task = Task({data: params, callback: fn, taskOwner: msg.sender, billTo: billableWallet});
-    IncentivizedTask it = IncentivizedTask({task: task, incentive: incentive});
-    tasks.push(ScheduledTask({repeatTimes: repeatTimes, lastRun: 0, waitTime: waitTime, scheduled: it});
-  }
 
-  function getWork() public view {
-    uint[] work;
-    for(uint i = 0; i < tasks.length; i++) {
-      if(canRun(i)) {
-        work.push(i);
-      }
-    }
-    return canRun;
-  }
+	function run(uint index) public {
+		require(canRun(index));
+		bool toDelete = false;
+		tasks[index].lastRun = now;
+		if(tasks[index].repeatTimes >= 1) {
+			tasks[index].repeatTimes--;
+		} else {
+			toDelete = true;
+		}
+		IncentivizedTask storage toRun = tasks[index].scheduled;
+		bool ran = toRun.task.contractLocation.call(toRun.task.callback, toRun.task.data);
+		bool billed;
+		(billed) = BillableWallet(toRun.task.billTo).bill(toRun.incentive);
+		require(billed);
+		require(ran);
+		if(toDelete) {
+			// delete the index so it can't be updated
+			userTaskIndex[msg.sender][toRun.task.contractLocation] = 0;
+			// take the last task and put it in the current spot
+			tasks[index] = tasks[tasks.length -1];
+			// set the last task's index to it's new position
+			Task storage moved = tasks[index].scheduled.task;
+			userTaskIndex[moved.taskOwner][moved.contractLocation] = index;
+			delete tasks[tasks.length -1];
+		}
+	}
 
-  function run(index) public {
-    require(canRun(index));
-    bool toDelete = false;
-    tasks[index].lastRun = now;
-    if(tasks[index].repeatTimes > 1) {
-      tasks[index].repeatTimes--;
-    } else if (tasks[index].repeatTimes == 1) {
-      toDelete = true;
-    }
-    Task toRun = tasks[index];
-    toRun.callback(toRun.data);
-    if(toDelete) {
-      tasks[index] = tasks[tasks.length -1];
-      delete tasks[tasks.length -1];
-    }
-    msg.sender.transfer(toRun.task.incentive)
-  }
+	function taskAt(uint index) view public returns(address, bytes4, bytes, address, address) {
+		Task storage thisTask = tasks[index].scheduled.task;
+		bytes storage data = thisTask.data;
+		bytes4 callback = thisTask.callback;
+		address contractLocation = thisTask.contractLocation;
+		address taskOwner = thisTask.taskOwner;
+		address billTo = thisTask.billTo;
+		return (contractLocation, callback, data, taskOwner, billTo);
+	}
 }
